@@ -34,7 +34,6 @@ def parse_amazon_page(url):
         html_text = response.text
         
         # 1. Check Out of Stock
-        oos_keywords = ["currently unavailable", "out of stock", "dispatched from and sold by amazon"]
         is_oos = any(kw in html_text.lower() for kw in ["currently unavailable", "temporary out of stock"])
         
         # 2. Extract Buy Box Price & Seller
@@ -77,8 +76,8 @@ def parse_amazon_page(url):
             
         return status, price, seller, fallback_price
 
-except Exception as e:
-    return "ERROR", "None", "None", "None"
+    except Exception as e:
+        return "ERROR", "None", "None", "None"
 
 if uploaded_file is not None:
     # Read file safely
