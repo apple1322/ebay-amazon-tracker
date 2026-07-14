@@ -11,69 +11,75 @@ st.set_page_config(page_title="EBay-Amazon Tracker", layout="wide")
 st.title("📦 eBay-Amazon Price & Stock Monitor")
 st.write("Upload your Excel/CSV file containing SKUs and Amazon UK/US URLs.")
 
-# File Uploader
 uploaded_file = st.file_uploader("Choose a file (Excel or CSV)", type=["xlsx", "csv"])
 
 def parse_amazon_page(url):
-    # Dynamic headers based on domain
-    is_uk = "amazon.co.uk" in url.lower()
-    
+    # Convert standard desktop URLs to mobile layouts to bypass heavy firewalls
+    url = url.replace("www.amazon", "www.amazon") # fallback base
+    if "/dp/" in url:
+        url = re.sub(r'amazon\.(co\.uk|com)/[^/]+/dp/', r'amazon.\1/dp/', url)
+
+    # Mimic a clean, lightweight mobile device profile
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "en-GB,en;q=0.9" if is_uk else "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Device-Memory": "8"
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive"
     }
     
     try:
-        # Paced human delay
-        time.sleep(random.uniform(3.5, 6.5))
+        # Paced random delays to look completely human
+        time.sleep(random.uniform(4.5, 7.5))
         
         response = requests.get(url, headers=headers, timeout=15)
-        
-        if response.status_code == 503 or "api-services-support@amazon" in response.text or "captcha" in response.text.lower():
-            return "BLOCKED", "None", "None", "None"
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
         html_text = response.text
         
-        # 1. Check Out of Stock
-        is_oos = any(kw in html_text.lower() for kw in ["currently unavailable", "temporary out of stock", "out of stock"])
+        # Immediate verification if Amazon is hitting us with a block/captcha
+        if response.status_code == 503 or "captcha" in html_text.lower() or "robot check" in html_text.lower():
+            return "BLOCKED BY AMAZON", "None", "None", "None"
+            
+        soup = BeautifulSoup(html_text, 'html.parser')
         
-        # 2. Extract Buy Box Price
+        # 1. Broad Price Extraction (Searching everywhere on the mobile structure)
         price = "None"
         price_selectors = [
             "span.a-price-whole",
             "span.apexPriceToPay span.a-offscreen",
-            "#priceblock_ourprice",
-            "#priceblock_saleprice",
-            ".a-price .a-offscreen"
+            "span.a-price .a-offscreen",
+            ".a-size-large.a-color-price",
+            "#price_inside_buybox",
+            "span.a-color-price"
         ]
         
         for sel in price_selectors:
             element = soup.select_one(sel)
             if element:
                 price = element.get_text().strip()
-                # Clean up duplicate symbols if any
-                if price.count('£') > 1 or price.count('$') > 1:
-                    price = price.split()[0]
                 break
         
-        # Clean price string from messy HTML spacing
-        price = re.sub(r'\s+', '', price)
-                
-        # 3. Identify Seller
-        seller = "Third-Party"
-        merchant_text = soup.select_one("#merchantInfoID, #sellerProfileTriggerId")
+        # Clean price text formatting safely
+        if price != "None":
+            price = re.sub(r'\s+', '', price)
+            price_match = re.search(r'([£\$]\d+[\.,]\d\d|\d+[\.,]\d\d|[£\$]\d+)', price)
+            if price_match:
+                price = price_match.group(1)
+
+        # 2. Refined Out of Stock Detection
+        is_oos = any(kw in html_text.lower() for kw in ["currently unavailable", "temporary out of stock", "out of stock"])
         
+        # Cross-verify: If there's an "Add to Cart" or "Buy Now" button, it IS in stock
+        if "add to cart" in html_text.lower() or "add to basket" in html_text.lower() or "buy now" in html_text.lower():
+            is_oos = False
+
+        # 3. Seller Identification
+        seller = "Third-Party"
         if "sold by amazon" in html_text.lower() or "dispatched from and sold by amazon" in html_text.lower():
-            seller = "Amazon"
-        elif merchant_text and ("amazon" in merchant_text.get_text().lower()):
             seller = "Amazon"
         elif "fulfilled by amazon" in html_text.lower() or "dispatched from amazon" in html_text.lower() or "ships from amazon" in html_text.lower():
             seller = "Third-Party (Prime)"
             
-        # 4. Check Stock Status
+        # 4. Final Status Processing
         status = "IN STOCK"
         if is_oos:
             status = "OUT OF STOCK"
@@ -83,16 +89,11 @@ def parse_amazon_page(url):
             if low_stock_match:
                 status = f"LOW IN STOCK ({low_stock_match.group(1)} Left)"
                 
-        # 5. Extract Fallback Lowest 3rd Party Price
-        fallback_price = "None"
-        fallback_selectors = ["div#olpLinkWidget_feature_div span.a-color-price", "span.olp-new-link span.a-color-price", ".olp-links .a-color-price"]
-        for f_sel in fallback_selectors:
-            f_element = soup.select_one(f_sel)
-            if f_element:
-                fallback_price = f_element.get_text().strip()
-                break
-            
-        return status, price, seller, fallback_price
+        # If price is still missing but we know it's in stock, mark it clearly
+        if status == "IN STOCK" and price == "None":
+            status = "IN STOCK (Price Hidden)"
+
+        return status, price, seller, "None"
 
     except Exception as e:
         return "ERROR", "None", "None", "None"
@@ -108,7 +109,6 @@ if uploaded_file is not None:
     
     columns = df.columns.tolist()
     
-    # Try to auto-select columns if common names exist
     default_sku = columns[0]
     default_url = columns[0]
     for col in columns:
@@ -134,15 +134,14 @@ if uploaded_file is not None:
             status_text.text(f"Processing ({index+1}/{total_rows}): Checking SKU {sku}...")
             
             if pd.isna(row[url_col]) or "amazon" not in url.lower():
-                results.append({"SKU": sku, "URL": url, "Live Price": "None", "Seller": "None", "Fallback 3rd Party": "None", "Status": "INVALID URL"})
+                results.append({"SKU": sku, "URL": url, "Live Price": "None", "Seller": "None", "Status": "INVALID URL"})
             else:
-                status, price, seller, fallback_price = parse_amazon_page(url)
+                status, price, seller, _ = parse_amazon_page(url)
                 results.append({
                     "SKU": sku,
                     "URL": url,
                     "Live Price": price,
                     "Seller": seller,
-                    "Fallback 3rd Party": fallback_price,
                     "Status": status
                 })
                 
